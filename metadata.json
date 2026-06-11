@@ -1,0 +1,6 @@
+{
+  "name": "Arc. Companion",
+  "description": "Secure AI crypto companion featuring wallet connection, AI chat assistant, analytics, real-time transaction tracking, and secure OTP verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
