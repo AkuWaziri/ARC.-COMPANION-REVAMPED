@@ -33,6 +33,7 @@ export interface ChatMessage {
   sender: 'user' | 'agent';
   text: string;
   timestamp: string;
+  retryPrompt?: string;
   pendingTx?: {
     type: 'transfer' | 'trade' | 'rebalance' | 'copy_trade';
     recipient?: string;

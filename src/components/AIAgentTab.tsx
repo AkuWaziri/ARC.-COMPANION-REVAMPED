@@ -73,6 +73,9 @@ export default function AIAgentTab({ address, isDemo, email2FA, is2FAEnabled, on
   };
   const [userInput, setUserInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingText, setLoadingText] = useState("AI Agent analyzing intent...");
+  const pendingQueueRef = useRef<string[]>([]);
+  const isProcessingRef = useRef(false);
 
   // OTP Verification overlay inside chat
   const [otpmode, setOtpMode] = useState(false);
@@ -104,7 +107,7 @@ export default function AIAgentTab({ address, isDemo, email2FA, is2FAEnabled, on
   }, [messages, loading]);
 
   const handleSendMessage = async (textToSend: string) => {
-    if (!textToSend.trim() || loading) return;
+    if (!textToSend.trim()) return;
 
     // Add user message to chat state
     const userMsgId = "msg_user_" + Date.now();
@@ -116,57 +119,108 @@ export default function AIAgentTab({ address, isDemo, email2FA, is2FAEnabled, on
     };
 
     setMessages(prev => [...prev, newUserMsg]);
-    setLoading(true);
     setUserInput("");
 
-    try {
-      // Call backend intent parser which leverages Gemini model live
-      const res = await fetch("/api/parse-intent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: textToSend, address })
-      });
+    // Push prompt to the ref queue
+    pendingQueueRef.current.push(textToSend);
 
-      if (res.ok) {
-        const data = await res.json();
-        
-        // Formulate agent message state
-        const agentMsgId = "msg_agent_" + Date.now();
-        const newAgentMsg: ChatMessage = {
-          id: agentMsgId,
-          sender: "agent",
-          text: data.answer || "I parsed that request but couldn't generate a specific response.",
-          timestamp: new Date().toISOString()
-        };
+    // Process the queue
+    processQueue();
+  };
 
-        // If the intent parsed requires user action (confirm trade or transfer)
-        if (["transfer", "trade", "rebalance", "copy_trade"].includes(data.type)) {
-          newAgentMsg.pendingTx = {
-            type: data.type as any,
-            recipient: data.recipient,
-            amount: data.amount,
-            token: data.token,
-            memo: data.memo,
-            estimatedGas: data.estimatedGas || "0.005 USDC",
-            targetAllocation: data.targetAllocation,
-            traderAddress: data.traderAddress
-          };
+  const processQueue = async () => {
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    setLoading(true);
+
+    while (pendingQueueRef.current.length > 0) {
+      const currentText = pendingQueueRef.current[0];
+      setLoadingText("AI Agent analyzing intent...");
+
+      const maxRetries = 3;
+      let success = false;
+
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+        try {
+          if (attempt > 0) {
+            setLoadingText(`Processing your request, please wait (retrying ${attempt}/${maxRetries})...`);
+            // Wait 2 seconds before retry
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } else {
+            setLoadingText("Processing your request, please wait...");
+          }
+
+          const res = await fetch("/api/parse-intent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: currentText, address }),
+            signal: controller.signal
+          });
+
+          clearTimeout(timeoutId);
+
+          if (res.ok) {
+            const data = await res.json();
+
+            // Formulate agent message state
+            const agentMsgId = "msg_agent_" + Date.now();
+            const newAgentMsg: ChatMessage = {
+              id: agentMsgId,
+              sender: "agent",
+              text: data.answer || "I parsed that request but couldn't generate a specific response.",
+              timestamp: new Date().toISOString()
+            };
+
+            // If the intent parsed requires user action (confirm trade or transfer)
+            if (["transfer", "trade", "rebalance", "copy_trade"].includes(data.type)) {
+              newAgentMsg.pendingTx = {
+                type: data.type as any,
+                recipient: data.recipient,
+                amount: data.amount,
+                token: data.token,
+                memo: data.memo,
+                estimatedGas: data.estimatedGas || "0.005 USDC",
+                targetAllocation: data.targetAllocation,
+                traderAddress: data.traderAddress
+              };
+            }
+
+            setMessages(prev => [...prev, newAgentMsg]);
+            success = true;
+            break; // Break the automatic retry loop on success
+          } else {
+            throw new Error(`Server returned status ${res.status}`);
+          }
+        } catch (err: any) {
+          clearTimeout(timeoutId);
+          console.error(`Attempt ${attempt} failed:`, err);
+
+          if (attempt === maxRetries) {
+            const isTimeout = err.name === "AbortError";
+            const errorText = isTimeout
+              ? "My communications link with the core AI timed out. Please check your network and try again."
+              : "My communications link with the core AI is currently overloaded. Please try again in brief moments.";
+
+            setMessages(prev => [...prev, {
+              id: "msg_err_" + Date.now(),
+              sender: "agent",
+              text: errorText,
+              timestamp: new Date().toISOString(),
+              retryPrompt: currentText
+            }]);
+          }
         }
-
-        setMessages(prev => [...prev, newAgentMsg]);
-      } else {
-        throw new Error("Failed backend intent query");
       }
-    } catch (err) {
-      setMessages(prev => [...prev, {
-        id: "msg_err_" + Date.now(),
-        sender: "agent",
-        text: "My communications link with the core AI is currently overloaded. Please try again in brief moments.",
-        timestamp: new Date().toISOString()
-      }]);
-    } finally {
-      setLoading(false);
+
+      // Remove the processed item from the queue
+      pendingQueueRef.current.shift();
     }
+
+    isProcessingRef.current = false;
+    setLoading(false);
   };
 
   // Handle click of suggetion chips
@@ -444,7 +498,19 @@ export default function AIAgentTab({ address, isDemo, email2FA, is2FAEnabled, on
                     ? "bg-gradient-to-r from-teal-600 to-indigo-600 text-white rounded-tr-none" 
                     : "bg-white/[0.04] text-gray-200 border border-white/5 rounded-tl-none"
                 }`}>
-                  {m.text}
+                  <div>{m.text}</div>
+                  {m.retryPrompt && (
+                    <div className="mt-2 pt-2 border-t border-white/5 flex flex-col gap-1.5">
+                      <div className="text-[10px] text-gray-400 italic">Prompt: "{m.retryPrompt}"</div>
+                      <button
+                        type="button"
+                        onClick={() => handleSendMessage(m.retryPrompt!)}
+                        className="self-start py-1 px-2.5 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 text-amber-400 text-[10px] font-bold transition-colors select-none cursor-pointer"
+                      >
+                        Retry Command
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Timestamp label */}
@@ -568,7 +634,7 @@ export default function AIAgentTab({ address, isDemo, email2FA, is2FAEnabled, on
                 <span className="h-1.5 w-1.5 bg-teal-400 rounded-full animate-bounce [animation-delay:0.2s]"></span>
                 <span className="h-1.5 w-1.5 bg-teal-400 rounded-full animate-bounce [animation-delay:0.4s]"></span>
               </span>
-              <span>AI Agent analyzing intent...</span>
+              <span>{loadingText}</span>
             </div>
           )}
 
@@ -591,7 +657,7 @@ export default function AIAgentTab({ address, isDemo, email2FA, is2FAEnabled, on
           <button
             id="chat-submit-btn"
             type="submit"
-            disabled={!userInput.trim() || loading}
+            disabled={!userInput.trim()}
             className="p-3 rounded-xl bg-teal-500 hover:bg-teal-600 disabled:opacity-40 active:scale-95 transition-all text-black flex items-center justify-center shadow-lg shadow-teal-500/10"
           >
             <Send className="w-4 h-4" />

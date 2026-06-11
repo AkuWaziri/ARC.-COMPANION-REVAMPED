@@ -11,15 +11,25 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Initialize Gemini SDK with User-Agent telemetry
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+// Initialize Gemini SDK with User-Agent telemetry lazily
+let aiClient: GoogleGenAI | null = null;
+function getAiClient(): GoogleGenAI {
+  if (!aiClient) {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      console.warn("[WARNING] GEMINI_API_KEY environment variable is not set. Falling back to local rules engine.");
     }
+    aiClient = new GoogleGenAI({
+      apiKey: key || "MOCK_KEY_FALLBACK",
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
   }
-});
+  return aiClient;
+}
 
 // Mock Database in-memory
 let contacts = [
@@ -446,7 +456,7 @@ async function generateContentWithRetry(prompt: string, systemPrompt: string): P
   for (const model of models) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const response = await ai.models.generateContent({
+        const response = await getAiClient().models.generateContent({
           model,
           contents: prompt,
           config: {
